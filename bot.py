@@ -13,7 +13,7 @@ from telegram.ext import (
 TOKEN = os.getenv("BOT_TOKEN")
 
 # Konkurs o'tkaziladigan kanal username'i
-CHANNEL = "@OPENBUJETRASMI
+CHANNEL = "@OPENBUJETRASMI"
 
 # Kanal adminining Telegram ID'si
 ADMIN_ID = 8679536810
