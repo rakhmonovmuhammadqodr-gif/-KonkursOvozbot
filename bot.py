@@ -16,22 +16,17 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 logging.basicConfig(level=logging.INFO)
 
-# Foydalanuvchilar
 users = set()
-
-# Konkurs qatnashchilari: username -> ovoz
 participants = {}
-
-# Bir odam bir qatnashchiga bir marta ovoz beradi
 votes = set()
-
-# Konkurs holati
 contest_active = False
+contest_message_id = None
+contest_chat_id = None
 
 
-def results_text():
+def get_results():
     if not participants:
-        return "Hozircha hech kim konkursga qo‘shilmagan."
+        return "Hozircha qatnashchilar yo‘q."
 
     ranking = sorted(
         participants.items(),
@@ -39,15 +34,37 @@ def results_text():
         reverse=True
     )
 
-    text = ""
+    lines = []
 
-    for username, count in ranking:
-        text += f"@{username} — {count}\n"
+    for i, (username, count) in enumerate(ranking, 1):
+        if i == 1:
+            prefix = "🥇"
+        elif i == 2:
+            prefix = "🥈"
+        elif i == 3:
+            prefix = "🥉"
+        else:
+            prefix = f"{i}."
 
-    return text
+        lines.append(f"{prefix} @{username} — {count}")
+
+    return "\n".join(lines)
 
 
-def contest_keyboard():
+def contest_text():
+    return (
+        "🏆 BATL BOSHLANDI! 🥳\n\n"
+        "❗️Konkurs shartlari — kanalga obuna bo‘lish "
+        "va do‘stlaringiz sizga ovoz berishini so‘rashdan iborat.\n\n"
+        "⚠️ Agar kanalga qo‘shilib ovoz berib chiqib ketsa, "
+        "ovozi avtomatik bekor qilinadi.\n\n"
+        "🎁 Konkursga qo‘yilgan yutuqlar: 🤫\n\n"
+        "📊 KONKURS NATIJALARI\n\n"
+        f"{get_results()}"
+    )
+
+
+def keyboard():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
@@ -57,11 +74,24 @@ def contest_keyboard():
         ],
         [
             InlineKeyboardButton(
-                "📊 NATIJALAR",
+                "📊 KONKURS NATIJALARI",
                 callback_data="results"
             )
         ]
     ])
+
+
+async def update_contest_message(context):
+    if contest_chat_id and contest_message_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=contest_chat_id,
+                message_id=contest_message_id,
+                text=contest_text(),
+                reply_markup=keyboard()
+            )
+        except Exception as e:
+            logging.error("Natijani yangilash xatosi: %s", e)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -72,7 +102,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     users.add(user.id)
 
-    # Ovoz linki orqali kirish
     if context.args and context.args[0].startswith("vote_"):
         target = context.args[0][5:].lower()
 
@@ -82,99 +111,56 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        keyboard = InlineKeyboardMarkup([
+        if target not in participants:
+            await update.message.reply_text(
+                "❌ Bu ishtirokchi konkursda yo‘q."
+            )
+            return
+
+        await update.message.reply_text(
+            "🏆 OVOZ BERISH\n\n"
+            "❗ Avval kanalga obuna bo‘ling.\n"
+            "Keyin 🗳 OVOZ BERISH tugmasini bosing.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "📢 KANALGA OBUNA BO‘LISH",
+                        url=f"https://t.me/{CHANNEL.replace('@', '')}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🗳 OVOZ BERISH",
+                        callback_data=f"vote:{target}"
+                    )
+                ]
+            ])
+        )
+        return
+
+    await update.message.reply_text(
+        "✅ Xush kelibsiz!\n\n"
+        "🤖 Ovoz Battle Pro ishga tushdi!\n\n"
+        "👇 Kerakli bo‘limni tanlang:",
+        reply_markup=InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
-                    "📢 KANALGA OBUNA BO‘LISH",
-                    url=f"https://t.me/{CHANNEL.replace('@', '')}"
+                    "🏆 OVOZLI KONKURS",
+                    callback_data="menu_voice"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "🗳 OVOZ BERISH",
-                    callback_data=f"vote:{target}"
+                    "🎲 RANDOM KONKURS",
+                    callback_data="menu_random"
+                ),
+                InlineKeyboardButton(
+                    "⚔️ LIKE BATTLE",
+                    callback_data="menu_battle"
                 )
             ]
         ])
-
-        await update.message.reply_text(
-            "🏆 OVOZ BATTLE\n\n"
-            "1️⃣ Avval kanalga obuna bo‘ling.\n"
-            "2️⃣ Keyin 🗳 OVOZ BERISH tugmasini bosing.",
-            reply_markup=keyboard
-        )
-        return
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "🏆 OVOZLI KONKURS",
-                callback_data="menu_voice"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🎲 RANDOM KONKURS",
-                callback_data="menu_random"
-            ),
-            InlineKeyboardButton(
-                "⚔️ LIKE BATTLE",
-                callback_data="menu_battle"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔍 KONKURSNI TEKSHIRISH",
-                callback_data="menu_check"
-            )
-        ]
-    ])
-
-    await update.message.reply_text(
-        "✅ Xush kelibsiz!\n\n"
-        "🤖 Bot ishga tushdi!\n\n"
-        "📌 Kanalda:\n"
-        "• #konkurs — ovozli konkurs\n"
-        "• #random — random konkurs\n"
-        "• #batl — like battle\n\n"
-        "👇 Kerakli bo‘limni tanlang:",
-        reply_markup=keyboard
     )
-
-
-async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "menu_voice":
-        await query.edit_message_text(
-            "🏆 OVOZLI KONKURS\n\n"
-            "Kanalga #konkurs yozilganda konkurs boshlanadi.\n\n"
-            "Har bir qatnashchi o‘z ovoz linkini oladi."
-        )
-
-    elif query.data == "menu_random":
-        await query.edit_message_text(
-            "🎲 RANDOM KONKURS\n\n"
-            "#random\n"
-            "Konkurs matni\n"
-            "Yutuq\n"
-            "Shartlari\n"
-            "@kanal\n"
-            "#soni 3"
-        )
-
-    elif query.data == "menu_battle":
-        await query.edit_message_text(
-            "⚔️ LIKE BATTLE\n\n"
-            "Like battle bo‘limi."
-        )
-
-    elif query.data == "menu_check":
-        await query.edit_message_text(
-            "🔍 KONKURSNI TEKSHIRISH\n\n"
-            "Ovozlar bot orqali nazorat qilinadi."
-        )
 
 
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -193,14 +179,13 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not user.username:
         await query.answer(
-            "❗ Avval Telegram username qo‘ying.",
+            "❗ Telegram username qo‘ying.",
             show_alert=True
         )
         return
 
     username = user.username.lower()
 
-    # Istagancha odam qo‘shilishi mumkin
     if username not in participants:
         participants[username] = 0
 
@@ -212,9 +197,9 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎉 KONKURSGA QO‘SHILDINGIZ!\n\n"
         f"👤 @{username}\n"
         f"🗳 Ovozlar: {participants[username]}\n\n"
-        "🔗 Shaxsiy ovoz linkingiz:\n"
+        "🔗 Sizning shaxsiy ovoz linkingiz:\n"
         f"{link}\n\n"
-        "📢 Linkni do‘stlaringizga yuboring.",
+        "📢 Shu linkni do‘stlaringizga yuboring.",
         reply_markup=InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
@@ -225,37 +210,17 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
+    await update_contest_message(context)
 
-async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if not participants:
-        text = "🏆 NATIJALAR\n\nHozircha qatnashchilar yo‘q."
-    else:
-        ranking = sorted(
-            participants.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )
-
-        text = "🏆 NATIJALAR\n\n"
-
-        for i, (username, count) in enumerate(ranking, 1):
-            if i == 1:
-                medal = "🥇"
-            elif i == 2:
-                medal = "🥈"
-            elif i == 3:
-                medal = "🥉"
-            else:
-                medal = f"{i}."
-
-            text += f"{medal} @{username} — {count}\n"
-
     await query.edit_message_text(
-        text,
-        reply_markup=contest_keyboard()
+        "🏆 KONKURS NATIJALARI\n\n"
+        + get_results(),
+        reply_markup=keyboard()
     )
 
 
@@ -279,11 +244,10 @@ async def vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Kanalga obunani tekshirish
     try:
         member = await context.bot.get_chat_member(
-            CHANNEL,
-            voter.id
+            chat_id=CHANNEL,
+            user_id=voter.id
         )
 
         if member.status in ("left", "kicked"):
@@ -293,7 +257,173 @@ async def vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    except Exception as error:
-        logging.error("Obuna tekshirish xatosi: %s", error)
+    except Exception as e:
+        logging.error("Obuna tekshirish xatosi: %s", e)
 
-       
+        await query.answer(
+            "⚠️ Kanal obunasini tekshirib bo‘lmadi.",
+            show_alert=True
+        )
+        return
+
+    vote_key = (voter.id, target)
+
+    if vote_key in votes:
+        await query.answer(
+            "⛔ Siz bu ishtirokchiga allaqachon ovoz bergansiz.",
+            show_alert=True
+        )
+        return
+
+    votes.add(vote_key)
+    participants[target] += 1
+
+    await query.answer("✅ Ovoz qabul qilindi!")
+
+    await query.edit_message_text(
+        "✅ OVOZ QABUL QILINDI!\n\n"
+        f"🏆 @{target}\n"
+        f"🗳 Jami ovoz: {participants[target]}"
+    )
+
+    await update_contest_message(context)
+
+
+async def konkurs_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global contest_active
+    global contest_message_id
+    global contest_chat_id
+
+    post = update.channel_post
+
+    if not post:
+        return
+
+    if post.chat.username:
+        if ("@" + post.chat.username).lower() != CHANNEL.lower():
+            return
+
+    text = post.text or post.caption or ""
+
+    if text.strip().lower() != "#konkurs":
+        return
+
+    contest_active = True
+    participants.clear()
+    votes.clear()
+
+    sent = await context.bot.send_message(
+        chat_id=post.chat_id,
+        text=contest_text(),
+        reply_markup=keyboard()
+    )
+
+    contest_message_id = sent.message_id
+    contest_chat_id = sent.chat_id
+
+
+async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🏆 TOP 10\n\n" + get_results()
+    )
+
+
+async def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global contest_active
+
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    contest_active = False
+
+    await update.message.reply_text(
+        "🏆 KONKURS YAKUNLANDI!\n\n"
+        + get_results()
+    )
+
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "📢 Foydalanish:\n/broadcast Xabaringiz"
+        )
+        return
+
+    text = " ".join(context.args)
+
+    sent = 0
+
+    for user_id in list(users):
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=text
+            )
+            sent += 1
+        except Exception:
+            pass
+
+    await update.message.reply_text(
+        f"✅ Xabar {sent} ta foydalanuvchiga yuborildi."
+    )
+
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    await update.message.reply_text(
+        "📊 STATISTIKA\n\n"
+        f"👥 Foydalanuvchilar: {len(users)}\n"
+        f"🏆 Qatnashchilar: {len(participants)}\n"
+        f"🗳 Ovozlar: {len(votes)}\n"
+        f"🔥 Konkurs: "
+        f"{'Faol 🟢' if contest_active else 'Yopiq 🔴'}"
+    )
+
+
+def main():
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN topilmadi!")
+
+    if ADMIN_ID == 0:
+        raise RuntimeError("ADMIN_ID sozlanmagan!")
+
+    app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("top", top))
+    app.add_handler(CommandHandler("finish", finish))
+    app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("stats", stats))
+
+    app.add_handler(
+        CallbackQueryHandler(join, pattern=r"^join$")
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(results, pattern=r"^results$")
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(vote, pattern=r"^vote:")
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.CHANNEL
+            & filters.Regex(r"(?i)^#konkurs$"),
+            konkurs_post
+        )
+    )
+
+    print("🏆 Ovoz Battle Pro ishga tushdi!")
+
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
