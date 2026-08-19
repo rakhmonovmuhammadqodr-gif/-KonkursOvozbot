@@ -1,910 +1,1080 @@
 import os
 import sqlite3
-from datetime import datetime, timezone
+import logging
+from typing import Optional
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application,
     CommandHandler,
+    MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
-    MessageHandler,
     filters,
 )
 
-# =====================================================
+# =========================================================
 # SOZLAMALAR
-# =====================================================
+# =========================================================
 
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("BOT_TOKEN", "")
+CHANNEL = os.getenv("CHANNEL_USERNAME", "@OPENBUJETRASMI")
 
-OWNER_IDS = [
-    8992965478,
-    8679536810
-]
+# Bot egasining Telegram ID'si
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
-DEFAULT_CHANNEL = "@OPENBUJETRASMI"
+# Adminlar ID'si: 123456;654321 kabi
+ADMIN_IDS_TEXT = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS = set()
 
-# =====================================================
+if ADMIN_IDS_TEXT:
+    for x in ADMIN_IDS_TEXT.split(";"):
+        try:
+            ADMIN_IDS.add(int(x.strip()))
+        except ValueError:
+            pass
+
+if OWNER_ID:
+    ADMIN_IDS.add(OWNER_ID)
+
+DB_FILE = "bot.db"
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# =========================================================
 # DATABASE
-# =====================================================
+# =========================================================
 
-db = sqlite3.connect("bot.db", check_same_thread=False)
-cur = db.cursor()
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    first_name TEXT,
-    joined_at TEXT,
-    last_seen TEXT
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS votes (
-    voter_id INTEGER,
-    target_id INTEGER,
-    created_at TEXT,
-    UNIQUE(voter_id, target_id)
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT
-)
-""")
-
-db.commit()
+def db():
+    return sqlite3.connect(DB_FILE)
 
 
-# =====================================================
-# VAQT
-# =====================================================
+def init_db():
+    con = db()
+    cur = con.cursor()
 
-def now():
-    return datetime.now(timezone.utc).isoformat()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS participants (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            added_count INTEGER DEFAULT 0
+        )
+    """)
 
-# =====================================================
-# HOMIY KANAL
-# =====================================================
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS votes (
+            voter_id INTEGER,
+            participant_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(voter_id, participant_id)
+        )
+    """)
 
-def get_channel():
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
 
-    cur.execute(
-        "SELECT value FROM settings WHERE key='channel'"
-    )
+    con.commit()
+    con.close()
 
-    result = cur.fetchone()
-
-    if result:
-        return result[0]
-
-    cur.execute(
-        "INSERT INTO settings (key,value) VALUES (?,?)",
-        ("channel", DEFAULT_CHANNEL)
-    )
-
-    db.commit()
-
-    return DEFAULT_CHANNEL
-
-
-def set_channel(channel):
-
-    cur.execute(
-        "INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)",
-        ("channel", channel)
-    )
-
-    db.commit()
-
-
-# =====================================================
-# FOYDALANUVCHI SAQLASH
-# =====================================================
 
 def save_user(user):
+    con = db()
+    cur = con.cursor()
 
-    current = now()
+    cur.execute("""
+        INSERT INTO users(user_id, username, first_name)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id)
+        DO UPDATE SET
+            username=excluded.username,
+            first_name=excluded.first_name
+    """, (
+        user.id,
+        user.username or "",
+        user.first_name or "",
+    ))
+
+    con.commit()
+    con.close()
+
+
+def get_all_users():
+    con = db()
+    cur = con.cursor()
+    cur.execute("SELECT user_id FROM users")
+    rows = cur.fetchall()
+    con.close()
+    return [x[0] for x in rows]
+
+
+def set_setting(key, value):
+    con = db()
+    cur = con.cursor()
+
+    cur.execute("""
+        INSERT INTO settings(key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key)
+        DO UPDATE SET value=excluded.value
+    """, (key, value))
+
+    con.commit()
+    con.close()
+
+
+def get_setting(key, default=None):
+    con = db()
+    cur = con.cursor()
 
     cur.execute(
-        "SELECT user_id FROM users WHERE user_id=?",
-        (user.id,)
+        "SELECT value FROM settings WHERE key=?",
+        (key,)
     )
 
-    exists = cur.fetchone()
+    row = cur.fetchone()
+    con.close()
 
-    if exists:
+    if row:
+        return row[0]
 
-        cur.execute("""
-            UPDATE users
-            SET username=?,
-                first_name=?,
-                last_seen=?
-            WHERE user_id=?
-        """, (
-            user.username or "",
-            user.first_name or "Foydalanuvchi",
-            current,
-            user.id
-        ))
-
-    else:
-
-        cur.execute("""
-            INSERT INTO users
-            (user_id, username, first_name, joined_at, last_seen)
-            VALUES (?, ?, ?, ?, ?)
-        """, (
-            user.id,
-            user.username or "",
-            user.first_name or "Foydalanuvchi",
-            current,
-            current
-        ))
-
-    db.commit()
+    return default
 
 
-# =====================================================
-# OBUNANI TEKSHIRISH
-# =====================================================
+# =========================================================
+# ADMIN
+# =========================================================
 
-async def is_subscribed(user_id, context):
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
 
-    channel = get_channel()
+
+# =========================================================
+# MAJBURIY OBUNA
+# =========================================================
+
+async def is_subscribed(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int
+) -> bool:
 
     try:
-
         member = await context.bot.get_chat_member(
-            chat_id=channel,
-            user_id=user_id
+            CHANNEL,
+            user_id
         )
 
         return member.status in (
-            "member",
-            "administrator",
-            "creator"
+            ChatMemberStatus.MEMBER,
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.OWNER,
         )
 
-    except Exception:
-
+    except Exception as e:
+        logger.warning("Subscription check error: %s", e)
         return False
 
 
-# =====================================================
-# HOMIY KANAL TUGMASI
-# =====================================================
+async def subscription_required(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+) -> bool:
 
-def sponsor_buttons():
+    user = update.effective_user
 
-    channel = get_channel()
+    if is_admin(user.id):
+        return False
 
-    return InlineKeyboardMarkup([
+    ok = await is_subscribed(context, user.id)
 
+    if ok:
+        return False
+
+    keyboard = [
         [
             InlineKeyboardButton(
-                "📢 Homiy kanal",
-                url=f"https://t.me/{channel.replace('@','')}"
+                "📢 Kanalga obuna bo‘lish",
+                url=f"https://t.me/{CHANNEL.lstrip('@')}"
             )
         ],
-
         [
             InlineKeyboardButton(
-                "✅ Obunani tekshirish",
+                "✅ Tekshirish",
                 callback_data="check_sub"
             )
         ]
+    ]
 
-    ])
+    text = (
+        "⚠️ Botdan foydalanish uchun avval kanalga obuna bo‘ling.\n\n"
+        "Obuna bo‘lgach, «Tekshirish» tugmasini bosing."
+    )
 
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await update.effective_message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
-# =====================================================
-# ASOSIY MENYU
-# =====================================================
-
-def main_menu():
-
-    return InlineKeyboardMarkup([
-
-        [
-            InlineKeyboardButton(
-                "🗳 Ovoz berish",
-                callback_data="vote_menu"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "🏆 TOP",
-                callback_data="top"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "📢 Homiy kanal",
-                callback_data="sponsor"
-            )
-        ]
-
-    ])
+    return True
 
 
-# =====================================================
+# =========================================================
 # START
-# =====================================================
+# =========================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.effective_user
-
     save_user(user)
 
+    # Referral
+    if context.args:
+        arg = context.args[0]
+
+        if arg.startswith("vote_"):
+            try:
+                participant_id = int(arg.replace("vote_", ""))
+
+                await vote_for_participant(
+                    update,
+                    context,
+                    participant_id
+                )
+
+                return
+
+            except ValueError:
+                pass
+
+    if await subscription_required(update, context):
+        return
+
+    text = """✅ Xush kelibsiz!
+
+🤖 Bot ishga tushdi!
+
+📌 Kanalda:
+   • #konkurs - ovozli konkurs
+   • #random - random konkurs
+   • #batl - like batl (yangi!)
+
+📝 Random konkurs formati:
+   #random
+   salom yangi konkurs boshlandik
+   yutuq nft emas
+   shartlari
+   @kanal
+   #soni 3
+
+🔍 Ovoz batl tekshirish:
+   • Quyidagi knopkani bosing va konkurs xabarini forward qiling
+
+👇 Kerakli bo‘limni tanlang:
+"""
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🏆 #KONKURS",
+                callback_data="menu_konkurs"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🎲 #RANDOM",
+                callback_data="menu_random"
+            ),
+            InlineKeyboardButton(
+                "❤️ #BATL",
+                callback_data="menu_batl"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🏅 TOP",
+                callback_data="menu_top"
+            )
+        ],
+    ]
+
+    if is_admin(user.id):
+        keyboard.append([
+            InlineKeyboardButton(
+                "👑 ADMIN",
+                callback_data="admin_menu"
+            )
+        ])
+
     await update.message.reply_text(
-
-        "🏆 KONKURS OVOZ BOT\n\n"
-        "Assalomu alaykum!\n\n"
-        "🗳 Ovoz berish uchun avval homiy "
-        "kanalga obuna bo‘ling.",
-
-        reply_markup=sponsor_buttons()
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
-# =====================================================
-# CALLBACK
-# =====================================================
+# =========================================================
+# MENU
+# =========================================================
 
-async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def menu_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     query = update.callback_query
-
     await query.answer()
 
-    user = query.from_user
+    data = query.data
 
-    save_user(user)
+    if data == "check_sub":
+        ok = await is_subscribed(
+            context,
+            query.from_user.id
+        )
 
-
-    # ================================================
-    # OBUNA TEKSHIRISH
-    # ================================================
-
-    if query.data == "check_sub":
-
-        if await is_subscribed(user.id, context):
-
+        if ok:
             await query.message.reply_text(
-                "✅ Obuna tasdiqlandi!\n\n"
-                "Endi ovoz berishingiz mumkin.",
-                reply_markup=main_menu()
+                "✅ Obuna tasdiqlandi!\n/start buyrug‘ini bosing."
             )
-
         else:
-
             await query.message.reply_text(
-                "❌ Siz hali homiy kanalga obuna bo‘lmagansiz.",
-                reply_markup=sponsor_buttons()
+                "❌ Hali kanalga obuna bo‘lmagansiz."
             )
 
         return
 
+    if await subscription_required(update, context):
+        return
 
-    # ================================================
-    # HOMIY KANAL
-    # ================================================
-
-    if query.data == "sponsor":
-
-        channel = get_channel()
-
-        keyboard = InlineKeyboardMarkup([
-
-            [
-                InlineKeyboardButton(
-                    "📢 Kanalga kirish",
-                    url=f"https://t.me/{channel.replace('@','')}"
-                )
-            ],
-
-            [
-                InlineKeyboardButton(
-                    "🔙 Orqaga",
-                    callback_data="back"
-                )
-            ]
-
-        ])
+    if data == "menu_konkurs":
 
         await query.message.reply_text(
-            f"📢 Homiy kanal:\n\n{channel}",
-            reply_markup=keyboard
+            "🏆 KONKURS\n\n"
+            "Konkursda qatnashish uchun konkurs xabaridagi "
+            "ishtirok etish tugmasidan foydalaning."
         )
 
-        return
-
-
-    # ================================================
-    # ORQAGA
-    # ================================================
-
-    if query.data == "back":
+    elif data == "menu_random":
 
         await query.message.reply_text(
-            "🏠 Asosiy menyu:",
-            reply_markup=main_menu()
+            "🎲 RANDOM KONKURS\n\n"
+            "Random konkurs formati:\n\n"
+            "#random\n"
+            "salom yangi konkurs boshlandik\n"
+            "yutuq nft emas\n"
+            "shartlari\n"
+            "@kanal\n"
+            "#soni 3"
         )
 
-        return
-
-
-    # ================================================
-    # OVOZ BERISH
-    # ================================================
-
-    if query.data == "vote_menu":
-
-        if not await is_subscribed(user.id, context):
-
-            await query.message.reply_text(
-                "❌ Ovoz berish uchun homiy kanalga obuna bo‘ling.",
-                reply_markup=sponsor_buttons()
-            )
-
-            return
-
-
-        # MUHIM:
-        # BU YERDA ADMIN EMAS,
-        # BOTGA KIRGAN BARCHA ODAMLAR OLINGAN
-
-        cur.execute("""
-            SELECT user_id, first_name
-            FROM users
-            ORDER BY first_name COLLATE NOCASE
-        """)
-
-        users = cur.fetchall()
-
-        if not users:
-
-            await query.message.reply_text(
-                "Hozircha ishtirokchilar yo‘q."
-            )
-
-            return
-
-
-        buttons = []
-
-        for target_id, name in users:
-
-            # O'ziga ovoz berish tugmasini ham ko'rsatmaymiz
-            if target_id == user.id:
-                continue
-
-            cur.execute("""
-                SELECT COUNT(*)
-                FROM votes
-                WHERE target_id=?
-            """, (target_id,))
-
-            vote_count = cur.fetchone()[0]
-
-            buttons.append([
-
-                InlineKeyboardButton(
-                    f"{name} — {vote_count} ta ovoz",
-                    callback_data=f"vote:{target_id}"
-                )
-
-            ])
-
-
-        if not buttons:
-
-            await query.message.reply_text(
-                "Hozircha sizdan boshqa ishtirokchi yo‘q."
-            )
-
-            return
-
+    elif data == "menu_batl":
 
         await query.message.reply_text(
-
-            "🗳 OVOZ BERISH\n\n"
-            "Ovoz bermoqchi bo‘lgan odamni tanlang:",
-
-            reply_markup=InlineKeyboardMarkup(buttons)
+            "❤️ LIKE BATL\n\n"
+            "Konkurs xabarini forward qilib, "
+            "batl natijasini tekshirishingiz mumkin."
         )
 
-        return
+    elif data == "menu_top":
 
+        await show_top(query.message)
 
-    # ================================================
-    # OVOZ
-    # ================================================
+    elif data == "admin_menu":
 
-    if query.data.startswith("vote:"):
-
-        if not await is_subscribed(user.id, context):
-
-            await query.message.reply_text(
-                "❌ Avval homiy kanalga obuna bo‘ling."
-            )
-
+        if not is_admin(query.from_user.id):
             return
-
-
-        target_id = int(
-            query.data.split(":")[1]
-        )
-
-
-        if target_id == user.id:
-
-            await query.message.reply_text(
-                "❌ O‘zingizga ovoz bera olmaysiz."
-            )
-
-            return
-
-
-        cur.execute(
-            "SELECT first_name FROM users WHERE user_id=?",
-            (target_id,)
-        )
-
-        target = cur.fetchone()
-
-        if not target:
-
-            await query.message.reply_text(
-                "❌ Ishtirokchi topilmadi."
-            )
-
-            return
-
-
-        try:
-
-            cur.execute("""
-                INSERT INTO votes
-                (voter_id, target_id, created_at)
-                VALUES (?, ?, ?)
-            """, (
-                user.id,
-                target_id,
-                now()
-            ))
-
-            db.commit()
-
-        except sqlite3.IntegrityError:
-
-            await query.message.reply_text(
-                "⚠️ Siz bu ishtirokchiga allaqachon ovoz bergansiz."
-            )
-
-            return
-
-
-        name = target[0]
-
-        cur.execute("""
-            SELECT COUNT(*)
-            FROM votes
-            WHERE target_id=?
-        """, (target_id,))
-
-        total = cur.fetchone()[0]
-
 
         await query.message.reply_text(
-
-            "✅ OVOZ QABUL QILINDI!\n\n"
-            f"👤 {name}\n"
-            f"🗳 {total} ta ovoz",
-
-            reply_markup=main_menu()
+            "👑 ADMIN PANEL\n\n"
+            "📢 Broadcast:\n"
+            "Botga yuborgan xabaringizni foydalanuvchilarga "
+            "tarqatish uchun xabarni yuboring.\n\n"
+            "Kanalga yuborish uchun:\n"
+            "/post"
         )
 
-        return
+
+# =========================================================
+# PARTICIPANT
+# =========================================================
+
+async def add_participant(user_id, username=""):
+
+    con = db()
+    cur = con.cursor()
+
+    cur.execute("""
+        INSERT INTO participants(user_id, username, added_count)
+        VALUES (?, ?, 0)
+        ON CONFLICT(user_id)
+        DO UPDATE SET username=excluded.username
+    """, (
+        user_id,
+        username or "",
+    ))
+
+    con.commit()
+    con.close()
 
 
-    # ================================================
-    # TOP
-    # ================================================
+def get_participants():
+    con = db()
+    cur = con.cursor()
 
-    if query.data == "top":
+    cur.execute("""
+        SELECT user_id, username, added_count
+        FROM participants
+        ORDER BY added_count DESC
+    """)
 
-        cur.execute("""
-            SELECT
-                u.first_name,
-                COUNT(v.target_id) AS vote_count
-            FROM users u
-            LEFT JOIN votes v
-            ON u.user_id = v.target_id
-            GROUP BY u.user_id
-            ORDER BY vote_count DESC, u.first_name ASC
-            LIMIT 50
-        """)
+    rows = cur.fetchall()
+    con.close()
 
-        rows = cur.fetchall()
-
-        if not rows:
-
-            await query.message.reply_text(
-                "🏆 Hozircha TOP bo‘sh."
-            )
-
-            return
+    return rows
 
 
-        text = "🏆 TOP ISHTIROKCHILAR\n\n"
-
-        for i, (name, votes) in enumerate(rows, 1):
-
-            text += (
-                f"{i}. {name} — "
-                f"{votes} ta ovoz\n"
-            )
-
-
-        await query.message.reply_text(
-            text,
-            reply_markup=main_menu()
-        )
-
-        return
-
-
-# =====================================================
-# /KONKURS
-# =====================================================
+# =========================================================
+# KONKURS
+# =========================================================
 
 async def konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    if await subscription_required(update, context):
+        return
+
     user = update.effective_user
 
-    save_user(user)
+    await add_participant(
+        user.id,
+        user.username
+    )
 
-    keyboard = InlineKeyboardMarkup([
+    me = await context.bot.get_me()
 
+    username = me.username
+
+    link = f"https://t.me/{username}?start=vote_{user.id}"
+
+    keyboard = [
         [
             InlineKeyboardButton(
-                "📢 Homiy kanalga obuna bo‘lish",
-                url=f"https://t.me/{get_channel().replace('@','')}"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "🗳 Ovoz berish",
-                callback_data="vote_menu"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "🏆 TOP",
-                callback_data="top"
+                "🗳 OVOZ BERISH",
+                url=link
             )
         ]
-
-    ])
-
+    ]
 
     await update.message.reply_text(
-
-        "🏆 KONKURS BOSHLANDI!\n\n"
-        "🗳 Ishtirokchilar ovoz yig‘adi.\n"
-        "👥 Eng ko‘p ovoz olganlar TOPda chiqadi.\n\n"
-        "📢 Ovoz berishdan oldin homiy "
-        "kanalga obuna bo‘ling.",
-
-        reply_markup=keyboard
+        "🏆 Konkursga muvaffaqiyatli qo‘shildingiz!\n\n"
+        "🔗 Sizning shaxsiy ovoz linkingiz:\n"
+        f"{link}\n\n"
+        "Do‘stlaringizga yuboring."
+        ,
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
-# =====================================================
-# ADMIN
-# =====================================================
+# =========================================================
+# VOTE
+# =========================================================
 
-async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def vote_for_participant(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    participant_id: int
+):
 
-    user = update.effective_user
+    voter = update.effective_user
+    save_user(voter)
 
-    if user.id not in OWNER_IDS:
+    if await subscription_required(update, context):
+        return
 
+    if voter.id == participant_id:
+
+        await update.effective_message.reply_text(
+            "❌ O‘zingizga ovoz bera olmaysiz."
+        )
+
+        return
+
+    con = db()
+    cur = con.cursor()
+
+    cur.execute("""
+        SELECT 1
+        FROM participants
+        WHERE user_id=?
+    """, (participant_id,))
+
+    if not cur.fetchone():
+        con.close()
+
+        await update.effective_message.reply_text(
+            "❌ Bu ishtirokchi topilmadi."
+        )
+
+        return
+
+    cur.execute("""
+        SELECT 1
+        FROM votes
+        WHERE voter_id=? AND participant_id=?
+    """, (
+        voter.id,
+        participant_id,
+    ))
+
+    if cur.fetchone():
+        con.close()
+
+        await update.effective_message.reply_text(
+            "⚠️ Siz bu ishtirokchiga allaqachon ovoz bergansiz."
+        )
+
+        return
+
+    cur.execute("""
+        INSERT INTO votes(voter_id, participant_id)
+        VALUES (?, ?)
+    """, (
+        voter.id,
+        participant_id,
+    ))
+
+    cur.execute("""
+        UPDATE participants
+        SET added_count = added_count + 1
+        WHERE user_id=?
+    """, (participant_id,))
+
+    con.commit()
+    con.close()
+
+    await update.effective_message.reply_text(
+        "✅ Ovoz muvaffaqiyatli berildi!"
+    )
+
+
+async def vote_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not context.args:
         await update.message.reply_text(
-            "❌ Sizda admin huquqi yo‘q."
+            "❌ Ishtirokchi ID ko‘rsatilmagan."
         )
-
         return
 
+    try:
+        participant_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            "❌ ID noto‘g‘ri."
+        )
+        return
 
-    cur.execute(
-        "SELECT COUNT(*) FROM users"
-    )
-
-    total = cur.fetchone()[0]
-
-
-    cur.execute(
-        "SELECT COUNT(DISTINCT voter_id) FROM votes"
-    )
-
-    active = cur.fetchone()[0]
-
-
-    cur.execute(
-        "SELECT COUNT(*) FROM votes"
-    )
-
-    total_votes = cur.fetchone()[0]
-
-
-    keyboard = InlineKeyboardMarkup([
-
-        [
-            InlineKeyboardButton(
-                "📊 Statistika",
-                callback_data="admin_stats"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "📢 Homiy kanalni o‘zgartirish",
-                callback_data="admin_channel"
-            )
-        ]
-
-    ])
-
-
-    await update.message.reply_text(
-
-        "👑 ADMIN PANEL\n\n"
-
-        f"👥 Jami odam: {total}\n"
-        f"🟢 Faol ovoz beruvchilar: {active}\n"
-        f"🗳 Jami ovozlar: {total_votes}\n\n"
-
-        f"📢 Homiy: {get_channel()}",
-
-        reply_markup=keyboard
+    await vote_for_participant(
+        update,
+        context,
+        participant_id
     )
 
 
-# =====================================================
-# ADMIN CALLBACK
-# =====================================================
+# =========================================================
+# TOP
+# =========================================================
 
-async def admin_callback(
+async def show_top(message):
+
+    rows = get_participants()
+
+    if not rows:
+        await message.reply_text(
+            "🏆 Hozircha TOP bo‘sh."
+        )
+        return
+
+    text = "🏆 TOP ISHTIROKCHILAR\n\n"
+
+    for i, (user_id, username, count) in enumerate(
+        rows[:10],
+        start=1
+    ):
+
+        name = f"@{username}" if username else str(user_id)
+
+        text += (
+            f"{i}. {name} — {count} ovoz\n"
+        )
+
+    await message.reply_text(text)
+
+
+async def top_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    query = update.callback_query
-
-    await query.answer()
-
-
-    if query.from_user.id not in OWNER_IDS:
+    if await subscription_required(update, context):
         return
 
-
-    # ================================================
-    # STATISTIKA
-    # ================================================
-
-    if query.data == "admin_stats":
-
-        cur.execute(
-            "SELECT COUNT(*) FROM users"
-        )
-
-        total = cur.fetchone()[0]
+    await show_top(update.message)
 
 
-        cur.execute(
-            "SELECT COUNT(DISTINCT voter_id) FROM votes"
-        )
+# =========================================================
+# RANDOM
+# =========================================================
 
-        active = cur.fetchone()[0]
+async def random_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
-
-        cur.execute(
-            "SELECT COUNT(*) FROM votes"
-        )
-
-        votes = cur.fetchone()[0]
-
-
-        await query.message.reply_text(
-
-            "📊 BOT STATISTIKASI\n\n"
-
-            f"👥 Jami foydalanuvchilar: {total}\n"
-            f"🟢 Faol ovoz berganlar: {active}\n"
-            f"🗳 Jami ovozlar: {votes}\n\n"
-
-            f"📢 Homiy kanal: {get_channel()}"
-        )
-
+    if await subscription_required(update, context):
         return
 
+    await update.message.reply_text(
+        "🎲 Random konkurs\n\n"
+        "Kanalda #random formatidagi konkurs "
+        "xabarini yuboring."
+    )
 
-    # ================================================
-    # HOMIY KANAL
-    # ================================================
 
-    if query.data == "admin_channel":
+# =========================================================
+# BATL
+# =========================================================
 
-        context.user_data["waiting_channel"] = True
+async def batl_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
-        await query.message.reply_text(
-
-            "📢 Homiy kanal username'ini yuboring.\n\n"
-
-            "Masalan:\n"
-            "@KanalNomi\n\n"
-
-            "⚠️ Bot o‘sha kanalga admin qilingan bo‘lishi kerak."
-        )
-
+    if await subscription_required(update, context):
         return
 
+    await update.message.reply_text(
+        "❤️ Ovoz batl tekshirish\n\n"
+        "Quyidagi knopkani bosing va konkurs "
+        "xabarini forward qiling."
+    )
 
-# =====================================================
-# ADMIN KANAL NOMINI QABUL QILISH
-# =====================================================
 
-async def text_handler(
+# =========================================================
+# ADMIN BROADCAST
+# =========================================================
+
+async def admin_broadcast_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
     user = update.effective_user
 
-
-    if user.id not in OWNER_IDS:
+    if not is_admin(user.id):
         return
 
+    users = get_all_users()
 
-    if not context.user_data.get("waiting_channel"):
+    sent = 0
+    failed = 0
+
+    for user_id in users:
+
+        try:
+
+            await update.message.copy(
+                chat_id=user_id
+            )
+
+            sent += 1
+
+        except Exception as e:
+
+            failed += 1
+            logger.warning(
+                "Broadcast failed %s: %s",
+                user_id,
+                e
+            )
+
+    await update.message.reply_text(
+        "📢 Broadcast tugadi!\n\n"
+        f"✅ Yuborildi: {sent}\n"
+        f"❌ Xatolik: {failed}"
+    )
+
+
+# =========================================================
+# ADMIN → KANAL
+# =========================================================
+
+async def post_to_channel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user = update.effective_user
+
+    if not is_admin(user.id):
+        await update.message.reply_text(
+            "❌ Bu buyruq faqat admin uchun."
+        )
         return
 
-
-    channel = update.message.text.strip()
-
-
-    if not channel.startswith("@"):
-        channel = "@" + channel
-
+    if not update.message.reply_to_message:
+        await update.message.reply_text(
+            "📌 Kanalga yuboriladigan xabarga reply qilib "
+            "/post yozing."
+        )
+        return
 
     try:
 
-        chat = await context.bot.get_chat(channel)
-
-        if chat.type != "channel":
-
-            await update.message.reply_text(
-                "❌ Bu username kanalniki emas."
-            )
-
-            return
-
-
-    except Exception:
-
-        await update.message.reply_text(
-
-            "❌ Kanal topilmadi.\n\n"
-            "Username'ni tekshiring va botni "
-            "kanalga admin qiling."
+        await update.message.reply_to_message.copy(
+            chat_id=CHANNEL
         )
 
+        await update.message.reply_text(
+            "✅ Xabar kanalga yuborildi."
+        )
+
+    except Exception as e:
+
+        await update.message.reply_text(
+            f"❌ Kanalga yuborishda xatolik:\n{e}"
+        )
+
+
+# =========================================================
+# ADMIN → BOT USERS + CHANNEL
+# =========================================================
+
+async def admin_message_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user = update.effective_user
+
+    if not is_admin(user.id):
         return
 
+    # Agar xabar /post buyruq emas va oddiy admin xabari bo‘lsa,
+    # foydalanuvchilarga tarqatiladi.
 
-    set_channel(channel)
+    users = get_all_users()
 
-    context.user_data["waiting_channel"] = False
+    sent = 0
+    failed = 0
 
+    for user_id in users:
+
+        if user_id == user.id:
+            continue
+
+        try:
+
+            await update.message.copy(
+                chat_id=user_id
+            )
+
+            sent += 1
+
+        except Exception as e:
+
+            failed += 1
+            logger.warning(
+                "Admin broadcast error: %s",
+                e
+            )
+
+    # Kanalga ham yuborish
+    channel_ok = False
+
+    try:
+
+        await update.message.copy(
+            chat_id=CHANNEL
+        )
+
+        channel_ok = True
+
+    except Exception as e:
+
+        logger.warning(
+            "Channel send error: %s",
+            e
+        )
 
     await update.message.reply_text(
-
-        "✅ HOMIY KANAL ULANDI!\n\n"
-        f"📢 {channel}"
+        "📢 Admin xabari tarqatildi!\n\n"
+        f"👥 Foydalanuvchilar: {sent}\n"
+        f"❌ Xatolar: {failed}\n"
+        f"📢 Kanal: {'✅' if channel_ok else '❌'}"
     )
 
 
-# =====================================================
+# =========================================================
+# ADMIN STATISTIKA
+# =========================================================
+
+async def stats_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not is_admin(update.effective_user.id):
+        return
+
+    users = get_all_users()
+    participants = get_participants()
+
+    con = db()
+    cur = con.cursor()
+
+    cur.execute("SELECT COUNT(*) FROM votes")
+    votes_count = cur.fetchone()[0]
+
+    con.close()
+
+    await update.message.reply_text(
+        "📊 BOT STATISTIKASI\n\n"
+        f"👥 Foydalanuvchilar: {len(users)}\n"
+        f"🏆 Ishtirokchilar: {len(participants)}\n"
+        f"🗳 Ovozlar: {votes_count}"
+    )
+
+
+# =========================================================
+# ADMINLARNI QO‘SHISH
+# =========================================================
+
+async def add_admin_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if update.effective_user.id != OWNER_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Foydalanish:\n/addadmin USER_ID"
+        )
+        return
+
+    try:
+        new_admin = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            "❌ ID noto‘g‘ri."
+        )
+        return
+
+    ADMIN_IDS.add(new_admin)
+
+    await update.message.reply_text(
+        f"✅ {new_admin} admin qilindi."
+    )
+
+
+# =========================================================
+# ADMINLARNI O‘CHIRISH
+# =========================================================
+
+async def remove_admin_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if update.effective_user.id != OWNER_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Foydalanish:\n/removeadmin USER_ID"
+        )
+        return
+
+    try:
+        admin_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            "❌ ID noto‘g‘ri."
+        )
+        return
+
+    if admin_id == OWNER_ID:
+        await update.message.reply_text(
+            "❌ Egani adminlikdan olib bo‘lmaydi."
+        )
+        return
+
+    ADMIN_IDS.discard(admin_id)
+
+    await update.message.reply_text(
+        "✅ Admin olib tashlandi."
+    )
+
+
+# =========================================================
+# XATOLIK
+# =========================================================
+
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    logger.error(
+        "Exception while handling update:",
+        exc_info=context.error
+    )
+
+
+# =========================================================
 # MAIN
-# =====================================================
+# =========================================================
 
 def main():
 
     if not TOKEN:
-
-        raise ValueError(
+        raise RuntimeError(
             "BOT_TOKEN topilmadi!"
         )
 
+    if not OWNER_ID:
+        raise RuntimeError(
+            "OWNER_ID topilmadi!"
+        )
+
+    init_db()
 
     app = (
-        Application
-        .builder()
+        Application.builder()
         .token(TOKEN)
         .build()
     )
 
-
-    # /start
+    # Commands
     app.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
+        CommandHandler("start", start)
     )
 
-
-    # /admin
     app.add_handler(
-        CommandHandler(
-            "admin",
-            admin
-        )
+        CommandHandler("konkurs", konkurs)
     )
 
-
-    # /konkurs
     app.add_handler(
-        CommandHandler(
-            "konkurs",
-            konkurs
-        )
+        CommandHandler("random", random_command)
     )
 
+    app.add_handler(
+        CommandHandler("batl", batl_command)
+    )
 
-    # Admin tugmalari
+    app.add_handler(
+        CommandHandler("top", top_command)
+    )
+
+    app.add_handler(
+        CommandHandler("vote", vote_command)
+    )
+
+    app.add_handler(
+        CommandHandler("stats", stats_command)
+    )
+
+    app.add_handler(
+        CommandHandler("post", post_to_channel)
+    )
+
+    app.add_handler(
+        CommandHandler("addadmin", add_admin_command)
+    )
+
+    app.add_handler(
+        CommandHandler("removeadmin", remove_admin_command)
+    )
+
+    # Buttons
     app.add_handler(
         CallbackQueryHandler(
-            admin_callback,
-            pattern="^admin_"
+            menu_callback
         )
     )
 
-
-    # Oddiy tugmalar
-    app.add_handler(
-        CallbackQueryHandler(
-            callback
-        )
-    )
-
-
-    # Admin kanal username'i
+    # Oddiy foydalanuvchilarni database'ga yozish
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            text_handler
-        )
+            filters.ALL & ~filters.COMMAND,
+            save_and_ignore
+        ),
+        group=1
+    )
+
+    # Admin xabarlari
+    app.add_handler(
+        MessageHandler(
+            filters.ALL & ~filters.COMMAND,
+            admin_message_handler
+        ),
+        group=2
+    )
+
+    app.add_error_handler(
+        error_handler
+    )
+
+    logger.info(
+        "KonkursOvozbot ishga tushdi!"
+    )
+
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES
     )
 
 
-    print("BOT ISHLADI!")
+async def save_and_ignore(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
-    app.run_polling()
+    if update.effective_user:
+        save_user(
+            update.effective_user
+        )
 
 
 if __name__ == "__main__":
