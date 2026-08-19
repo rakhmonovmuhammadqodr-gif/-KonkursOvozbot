@@ -1,13 +1,7 @@
 import os
 import sqlite3
 import logging
-from typing import Optional
-
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application,
@@ -22,27 +16,63 @@ from telegram.ext import (
 # SOZLAMALAR
 # =========================================================
 
-TOKEN = os.getenv("BOT_TOKEN", "")
-CHANNEL = os.getenv("CHANNEL_USERNAME", "@OPENBUJETRASMI")
+TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-# Bot egasining Telegram ID'si
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+CHANNEL = os.getenv(
+    "CHANNEL_USERNAME",
+    "@OPENBUJETRASMI"
+).strip()
 
-# Adminlar ID'si: 123456;654321 kabi
-ADMIN_IDS_TEXT = os.getenv("ADMIN_IDS", "")
+# OWNER_ID bo‘lsa ishlatadi.
+# Bo‘lmasa ADMIN_ID ni ham qabul qiladi.
+OWNER_ID_TEXT = (
+    os.getenv("OWNER_ID", "").strip()
+    or os.getenv("ADMIN_ID", "").strip()
+)
+
+try:
+    OWNER_ID = int(OWNER_ID_TEXT) if OWNER_ID_TEXT else 0
+except ValueError:
+    OWNER_ID = 0
+
+
+# ADMIN_IDS ham, ADMIN_ID ham ishlaydi
 ADMIN_IDS = set()
 
-if ADMIN_IDS_TEXT:
-    for x in ADMIN_IDS_TEXT.split(";"):
+admin_ids_text = os.getenv("ADMIN_IDS", "").strip()
+
+if admin_ids_text:
+    for item in admin_ids_text.replace(",", ";").split(";"):
+        item = item.strip()
+
+        if not item:
+            continue
+
         try:
-            ADMIN_IDS.add(int(x.strip()))
+            ADMIN_IDS.add(int(item))
         except ValueError:
             pass
+
+
+single_admin = os.getenv("ADMIN_ID", "").strip()
+
+if single_admin:
+    try:
+        ADMIN_IDS.add(int(single_admin))
+    except ValueError:
+        pass
+
 
 if OWNER_ID:
     ADMIN_IDS.add(OWNER_ID)
 
+
 DB_FILE = "bot.db"
+
+
+# =========================================================
+# LOG
+# =========================================================
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -67,8 +97,8 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
+            username TEXT DEFAULT '',
+            first_name TEXT DEFAULT '',
             joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -76,7 +106,7 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS participants (
             user_id INTEGER PRIMARY KEY,
-            username TEXT,
+            username TEXT DEFAULT '',
             added_count INTEGER DEFAULT 0
         )
     """)
@@ -90,28 +120,28 @@ def init_db():
         )
     """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-
     con.commit()
     con.close()
 
 
 def save_user(user):
+    if not user:
+        return
+
     con = db()
     cur = con.cursor()
 
     cur.execute("""
-        INSERT INTO users(user_id, username, first_name)
+        INSERT INTO users (
+            user_id,
+            username,
+            first_name
+        )
         VALUES (?, ?, ?)
         ON CONFLICT(user_id)
         DO UPDATE SET
-            username=excluded.username,
-            first_name=excluded.first_name
+            username = excluded.username,
+            first_name = excluded.first_name
     """, (
         user.id,
         user.username or "",
@@ -125,62 +155,31 @@ def save_user(user):
 def get_all_users():
     con = db()
     cur = con.cursor()
-    cur.execute("SELECT user_id FROM users")
-    rows = cur.fetchall()
-    con.close()
-    return [x[0] for x in rows]
-
-
-def set_setting(key, value):
-    con = db()
-    cur = con.cursor()
-
-    cur.execute("""
-        INSERT INTO settings(key, value)
-        VALUES (?, ?)
-        ON CONFLICT(key)
-        DO UPDATE SET value=excluded.value
-    """, (key, value))
-
-    con.commit()
-    con.close()
-
-
-def get_setting(key, default=None):
-    con = db()
-    cur = con.cursor()
 
     cur.execute(
-        "SELECT value FROM settings WHERE key=?",
-        (key,)
+        "SELECT user_id FROM users"
     )
 
-    row = cur.fetchone()
+    rows = cur.fetchall()
+
     con.close()
 
-    if row:
-        return row[0]
-
-    return default
+    return [row[0] for row in rows]
 
 
 # =========================================================
 # ADMIN
 # =========================================================
 
-def is_admin(user_id: int) -> bool:
+def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 
 # =========================================================
-# MAJBURIY OBUNA
+# OBUNA
 # =========================================================
 
-async def is_subscribed(
-    context: ContextTypes.DEFAULT_TYPE,
-    user_id: int
-) -> bool:
-
+async def is_subscribed(context, user_id):
     try:
         member = await context.bot.get_chat_member(
             CHANNEL,
@@ -194,23 +193,30 @@ async def is_subscribed(
         )
 
     except Exception as e:
-        logger.warning("Subscription check error: %s", e)
+        logger.warning(
+            "Subscription check error: %s",
+            e
+        )
+
         return False
 
 
-async def subscription_required(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-) -> bool:
-
+async def subscription_required(update, context):
     user = update.effective_user
 
+    if not user:
+        return False
+
+    # Adminlardan obuna talab qilinmaydi
     if is_admin(user.id):
         return False
 
-    ok = await is_subscribed(context, user.id)
+    subscribed = await is_subscribed(
+        context,
+        user.id
+    )
 
-    if ok:
+    if subscribed:
         return False
 
     keyboard = [
@@ -229,17 +235,17 @@ async def subscription_required(
     ]
 
     text = (
-        "⚠️ Botdan foydalanish uchun avval kanalga obuna bo‘ling.\n\n"
-        "Obuna bo‘lgach, «Tekshirish» tugmasini bosing."
+        "⚠️ Botdan foydalanish uchun avval kanalga "
+        "obuna bo‘ling.\n\n"
+        "Obuna bo‘lgach, «✅ Tekshirish» tugmasini bosing."
     )
 
     if update.callback_query:
-        await update.callback_query.answer()
         await update.callback_query.message.reply_text(
             text,
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-    else:
+    elif update.effective_message:
         await update.effective_message.reply_text(
             text,
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -255,15 +261,23 @@ async def subscription_required(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.effective_user
+
+    if not user:
+        return
+
     save_user(user)
 
-    # Referral
+    # Referral / vote link
     if context.args:
-        arg = context.args[0]
 
-        if arg.startswith("vote_"):
+        argument = context.args[0]
+
+        if argument.startswith("vote_"):
+
             try:
-                participant_id = int(arg.replace("vote_", ""))
+                participant_id = int(
+                    argument.replace("vote_", "")
+                )
 
                 await vote_for_participant(
                     update,
@@ -276,7 +290,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 pass
 
-    if await subscription_required(update, context):
+    if await subscription_required(
+        update,
+        context
+    ):
         return
 
     text = """✅ Xush kelibsiz!
@@ -299,8 +316,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔍 Ovoz batl tekshirish:
    • Quyidagi knopkani bosing va konkurs xabarini forward qiling
 
-👇 Kerakli bo‘limni tanlang:
-"""
+👇 Kerakli bo‘limni tanlang:"""
 
     keyboard = [
         [
@@ -345,25 +361,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MENU
 # =========================================================
 
-async def menu_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def menu_callback(update, context):
 
     query = update.callback_query
+
     await query.answer()
 
-    data = query.data
+    user = query.from_user
 
-    if data == "check_sub":
-        ok = await is_subscribed(
+    if query.data == "check_sub":
+
+        subscribed = await is_subscribed(
             context,
-            query.from_user.id
+            user.id
         )
 
-        if ok:
+        if subscribed:
             await query.message.reply_text(
-                "✅ Obuna tasdiqlandi!\n/start buyrug‘ini bosing."
+                "✅ Obuna tasdiqlandi!\n\n"
+                "/start buyrug‘ini bosing."
             )
         else:
             await query.message.reply_text(
@@ -372,22 +388,44 @@ async def menu_callback(
 
         return
 
-    if await subscription_required(update, context):
+    if query.data == "admin_menu":
+
+        if not is_admin(user.id):
+            await query.message.reply_text(
+                "❌ Sizda admin huquqi yo‘q."
+            )
+            return
+
+        await query.message.reply_text(
+            "👑 ADMIN PANEL\n\n"
+            "📢 Oddiy xabar yuborsangiz:\n"
+            "→ barcha bot foydalanuvchilariga yuboriladi\n"
+            "→ kanalga ham yuboriladi\n\n"
+            "📊 /stats — statistika\n"
+            "🏆 /top — TOP\n"
+            "📢 /post — reply qilingan xabarni kanalga yuborish"
+        )
+
         return
 
-    if data == "menu_konkurs":
+    if await subscription_required(
+        update,
+        context
+    ):
+        return
+
+    if query.data == "menu_konkurs":
 
         await query.message.reply_text(
             "🏆 KONKURS\n\n"
-            "Konkursda qatnashish uchun konkurs xabaridagi "
-            "ishtirok etish tugmasidan foydalaning."
+            "Konkursda qatnashish uchun "
+            "/konkurs buyrug‘idan foydalaning."
         )
 
-    elif data == "menu_random":
+    elif query.data == "menu_random":
 
         await query.message.reply_text(
             "🎲 RANDOM KONKURS\n\n"
-            "Random konkurs formati:\n\n"
             "#random\n"
             "salom yangi konkurs boshlandik\n"
             "yutuq nft emas\n"
@@ -396,47 +434,40 @@ async def menu_callback(
             "#soni 3"
         )
 
-    elif data == "menu_batl":
+    elif query.data == "menu_batl":
 
         await query.message.reply_text(
             "❤️ LIKE BATL\n\n"
-            "Konkurs xabarini forward qilib, "
+            "Konkurs xabarini forward qilib "
             "batl natijasini tekshirishingiz mumkin."
         )
 
-    elif data == "menu_top":
+    elif query.data == "menu_top":
 
-        await show_top(query.message)
-
-    elif data == "admin_menu":
-
-        if not is_admin(query.from_user.id):
-            return
-
-        await query.message.reply_text(
-            "👑 ADMIN PANEL\n\n"
-            "📢 Broadcast:\n"
-            "Botga yuborgan xabaringizni foydalanuvchilarga "
-            "tarqatish uchun xabarni yuboring.\n\n"
-            "Kanalga yuborish uchun:\n"
-            "/post"
+        await show_top(
+            query.message
         )
 
 
 # =========================================================
-# PARTICIPANT
+# PARTICIPANTS
 # =========================================================
 
-async def add_participant(user_id, username=""):
+def add_participant(user_id, username=""):
 
     con = db()
     cur = con.cursor()
 
     cur.execute("""
-        INSERT INTO participants(user_id, username, added_count)
+        INSERT INTO participants (
+            user_id,
+            username,
+            added_count
+        )
         VALUES (?, ?, 0)
         ON CONFLICT(user_id)
-        DO UPDATE SET username=excluded.username
+        DO UPDATE SET
+            username = excluded.username
     """, (
         user_id,
         username or "",
@@ -447,16 +478,21 @@ async def add_participant(user_id, username=""):
 
 
 def get_participants():
+
     con = db()
     cur = con.cursor()
 
     cur.execute("""
-        SELECT user_id, username, added_count
+        SELECT
+            user_id,
+            username,
+            added_count
         FROM participants
         ORDER BY added_count DESC
     """)
 
     rows = cur.fetchall()
+
     con.close()
 
     return rows
@@ -466,23 +502,27 @@ def get_participants():
 # KONKURS
 # =========================================================
 
-async def konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def konkurs(update, context):
 
-    if await subscription_required(update, context):
+    if await subscription_required(
+        update,
+        context
+    ):
         return
 
     user = update.effective_user
 
-    await add_participant(
+    add_participant(
         user.id,
         user.username
     )
 
-    me = await context.bot.get_me()
+    bot = await context.bot.get_me()
 
-    username = me.username
-
-    link = f"https://t.me/{username}?start=vote_{user.id}"
+    link = (
+        f"https://t.me/{bot.username}"
+        f"?start=vote_{user.id}"
+    )
 
     keyboard = [
         [
@@ -495,10 +535,9 @@ async def konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "🏆 Konkursga muvaffaqiyatli qo‘shildingiz!\n\n"
-        "🔗 Sizning shaxsiy ovoz linkingiz:\n"
+        "🔗 Sizning shaxsiy linkingiz:\n"
         f"{link}\n\n"
-        "Do‘stlaringizga yuboring."
-        ,
+        "Linkni do‘stlaringizga yuboring.",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -508,15 +547,19 @@ async def konkurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def vote_for_participant(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    participant_id: int
+    update,
+    context,
+    participant_id
 ):
 
     voter = update.effective_user
+
     save_user(voter)
 
-    if await subscription_required(update, context):
+    if await subscription_required(
+        update,
+        context
+    ):
         return
 
     if voter.id == participant_id:
@@ -531,12 +574,15 @@ async def vote_for_participant(
     cur = con.cursor()
 
     cur.execute("""
-        SELECT 1
+        SELECT user_id
         FROM participants
-        WHERE user_id=?
+        WHERE user_id = ?
     """, (participant_id,))
 
-    if not cur.fetchone():
+    participant = cur.fetchone()
+
+    if not participant:
+
         con.close()
 
         await update.effective_message.reply_text(
@@ -548,33 +594,41 @@ async def vote_for_participant(
     cur.execute("""
         SELECT 1
         FROM votes
-        WHERE voter_id=? AND participant_id=?
+        WHERE voter_id = ?
+        AND participant_id = ?
     """, (
         voter.id,
-        participant_id,
+        participant_id
     ))
 
-    if cur.fetchone():
+    already_voted = cur.fetchone()
+
+    if already_voted:
+
         con.close()
 
         await update.effective_message.reply_text(
-            "⚠️ Siz bu ishtirokchiga allaqachon ovoz bergansiz."
+            "⚠️ Siz bu ishtirokchiga "
+            "allaqachon ovoz bergansiz."
         )
 
         return
 
     cur.execute("""
-        INSERT INTO votes(voter_id, participant_id)
+        INSERT INTO votes (
+            voter_id,
+            participant_id
+        )
         VALUES (?, ?)
     """, (
         voter.id,
-        participant_id,
+        participant_id
     ))
 
     cur.execute("""
         UPDATE participants
         SET added_count = added_count + 1
-        WHERE user_id=?
+        WHERE user_id = ?
     """, (participant_id,))
 
     con.commit()
@@ -585,23 +639,27 @@ async def vote_for_participant(
     )
 
 
-async def vote_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def vote_command(update, context):
 
     if not context.args:
+
         await update.message.reply_text(
-            "❌ Ishtirokchi ID ko‘rsatilmagan."
+            "❌ Foydalanish:\n/vote USER_ID"
         )
+
         return
 
     try:
-        participant_id = int(context.args[0])
+        participant_id = int(
+            context.args[0]
+        )
+
     except ValueError:
+
         await update.message.reply_text(
             "❌ ID noto‘g‘ri."
         )
+
         return
 
     await vote_for_participant(
@@ -620,54 +678,66 @@ async def show_top(message):
     rows = get_participants()
 
     if not rows:
+
         await message.reply_text(
             "🏆 Hozircha TOP bo‘sh."
         )
+
         return
 
     text = "🏆 TOP ISHTIROKCHILAR\n\n"
 
-    for i, (user_id, username, count) in enumerate(
+    for number, row in enumerate(
         rows[:10],
         start=1
     ):
 
-        name = f"@{username}" if username else str(user_id)
+        user_id, username, count = row
+
+        if username:
+            name = f"@{username}"
+        else:
+            name = str(user_id)
 
         text += (
-            f"{i}. {name} — {count} ovoz\n"
+            f"{number}. {name} — "
+            f"{count} ovoz\n"
         )
 
-    await message.reply_text(text)
+    await message.reply_text(
+        text
+    )
 
 
-async def top_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def top_command(update, context):
 
-    if await subscription_required(update, context):
+    if await subscription_required(
+        update,
+        context
+    ):
         return
 
-    await show_top(update.message)
+    await show_top(
+        update.message
+    )
 
 
 # =========================================================
 # RANDOM
 # =========================================================
 
-async def random_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def random_command(update, context):
 
-    if await subscription_required(update, context):
+    if await subscription_required(
+        update,
+        context
+    ):
         return
 
     await update.message.reply_text(
-        "🎲 Random konkurs\n\n"
-        "Kanalda #random formatidagi konkurs "
-        "xabarini yuboring."
+        "🎲 RANDOM KONKURS\n\n"
+        "Kanalda #random formatidagi "
+        "konkurs xabarini yuboring."
     )
 
 
@@ -675,33 +745,41 @@ async def random_command(
 # BATL
 # =========================================================
 
-async def batl_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def batl_command(update, context):
 
-    if await subscription_required(update, context):
+    if await subscription_required(
+        update,
+        context
+    ):
         return
 
     await update.message.reply_text(
-        "❤️ Ovoz batl tekshirish\n\n"
-        "Quyidagi knopkani bosing va konkurs "
-        "xabarini forward qiling."
+        "❤️ OVOZ BATL\n\n"
+        "Quyidagi knopkani bosing va "
+        "konkurs xabarini forward qiling."
     )
 
 
 # =========================================================
-# ADMIN BROADCAST
+# ADMIN → USERS + CHANNEL
 # =========================================================
 
-async def admin_broadcast_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+async def admin_message_handler(
+    update,
+    context
 ):
 
     user = update.effective_user
 
+    if not user:
+        return
+
     if not is_admin(user.id):
+        return
+
+    message = update.effective_message
+
+    if not message:
         return
 
     users = get_all_users()
@@ -709,11 +787,15 @@ async def admin_broadcast_message(
     sent = 0
     failed = 0
 
+    # Foydalanuvchilarga
     for user_id in users:
+
+        if user_id == user.id:
+            continue
 
         try:
 
-            await update.message.copy(
+            await message.copy(
                 chat_id=user_id
             )
 
@@ -722,41 +804,63 @@ async def admin_broadcast_message(
         except Exception as e:
 
             failed += 1
+
             logger.warning(
-                "Broadcast failed %s: %s",
+                "User broadcast error %s: %s",
                 user_id,
                 e
             )
 
-    await update.message.reply_text(
-        "📢 Broadcast tugadi!\n\n"
-        f"✅ Yuborildi: {sent}\n"
-        f"❌ Xatolik: {failed}"
+    # Kanalga
+    channel_sent = False
+
+    try:
+
+        await message.copy(
+            chat_id=CHANNEL
+        )
+
+        channel_sent = True
+
+    except Exception as e:
+
+        logger.warning(
+            "Channel send error: %s",
+            e
+        )
+
+    await message.reply_text(
+        "📢 Xabar yuborildi!\n\n"
+        f"👥 Foydalanuvchilar: {sent}\n"
+        f"❌ Xatolar: {failed}\n"
+        f"📢 Kanal: "
+        f"{'✅' if channel_sent else '❌'}"
     )
 
 
 # =========================================================
-# ADMIN → KANAL
+# ADMIN → CHANNEL /post
 # =========================================================
 
-async def post_to_channel(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def post_command(update, context):
 
     user = update.effective_user
 
     if not is_admin(user.id):
+
         await update.message.reply_text(
             "❌ Bu buyruq faqat admin uchun."
         )
+
         return
 
     if not update.message.reply_to_message:
+
         await update.message.reply_text(
-            "📌 Kanalga yuboriladigan xabarga reply qilib "
-            "/post yozing."
+            "📌 Kanalga yuboriladigan xabarga "
+            "reply qilib /post yozing."
         )
+
         return
 
     try:
@@ -771,90 +875,22 @@ async def post_to_channel(
 
     except Exception as e:
 
+        logger.exception(e)
+
         await update.message.reply_text(
-            f"❌ Kanalga yuborishda xatolik:\n{e}"
+            "❌ Kanalga yuborishda xatolik."
         )
 
 
 # =========================================================
-# ADMIN → BOT USERS + CHANNEL
+# ADMIN STATS
 # =========================================================
 
-async def admin_message_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def stats_command(update, context):
 
     user = update.effective_user
 
     if not is_admin(user.id):
-        return
-
-    # Agar xabar /post buyruq emas va oddiy admin xabari bo‘lsa,
-    # foydalanuvchilarga tarqatiladi.
-
-    users = get_all_users()
-
-    sent = 0
-    failed = 0
-
-    for user_id in users:
-
-        if user_id == user.id:
-            continue
-
-        try:
-
-            await update.message.copy(
-                chat_id=user_id
-            )
-
-            sent += 1
-
-        except Exception as e:
-
-            failed += 1
-            logger.warning(
-                "Admin broadcast error: %s",
-                e
-            )
-
-    # Kanalga ham yuborish
-    channel_ok = False
-
-    try:
-
-        await update.message.copy(
-            chat_id=CHANNEL
-        )
-
-        channel_ok = True
-
-    except Exception as e:
-
-        logger.warning(
-            "Channel send error: %s",
-            e
-        )
-
-    await update.message.reply_text(
-        "📢 Admin xabari tarqatildi!\n\n"
-        f"👥 Foydalanuvchilar: {sent}\n"
-        f"❌ Xatolar: {failed}\n"
-        f"📢 Kanal: {'✅' if channel_ok else '❌'}"
-    )
-
-
-# =========================================================
-# ADMIN STATISTIKA
-# =========================================================
-
-async def stats_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not is_admin(update.effective_user.id):
         return
 
     users = get_all_users()
@@ -863,8 +899,11 @@ async def stats_command(
     con = db()
     cur = con.cursor()
 
-    cur.execute("SELECT COUNT(*) FROM votes")
-    votes_count = cur.fetchone()[0]
+    cur.execute(
+        "SELECT COUNT(*) FROM votes"
+    )
+
+    votes = cur.fetchone()[0]
 
     con.close()
 
@@ -872,34 +911,43 @@ async def stats_command(
         "📊 BOT STATISTIKASI\n\n"
         f"👥 Foydalanuvchilar: {len(users)}\n"
         f"🏆 Ishtirokchilar: {len(participants)}\n"
-        f"🗳 Ovozlar: {votes_count}"
+        f"🗳 Ovozlar: {votes}"
     )
 
 
 # =========================================================
-# ADMINLARNI QO‘SHISH
+# ADMIN QO‘SHISH
 # =========================================================
 
 async def add_admin_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    update,
+    context
 ):
 
-    if update.effective_user.id != OWNER_ID:
+    user = update.effective_user
+
+    if user.id != OWNER_ID:
         return
 
     if not context.args:
+
         await update.message.reply_text(
-            "Foydalanish:\n/addadmin USER_ID"
+            "/addadmin USER_ID"
         )
+
         return
 
     try:
-        new_admin = int(context.args[0])
+        new_admin = int(
+            context.args[0]
+        )
+
     except ValueError:
+
         await update.message.reply_text(
             "❌ ID noto‘g‘ri."
         )
+
         return
 
     ADMIN_IDS.add(new_admin)
@@ -910,38 +958,51 @@ async def add_admin_command(
 
 
 # =========================================================
-# ADMINLARNI O‘CHIRISH
+# ADMIN O‘CHIRISH
 # =========================================================
 
 async def remove_admin_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    update,
+    context
 ):
 
-    if update.effective_user.id != OWNER_ID:
+    user = update.effective_user
+
+    if user.id != OWNER_ID:
         return
 
     if not context.args:
+
         await update.message.reply_text(
-            "Foydalanish:\n/removeadmin USER_ID"
+            "/removeadmin USER_ID"
         )
+
         return
 
     try:
-        admin_id = int(context.args[0])
+        admin_id = int(
+            context.args[0]
+        )
+
     except ValueError:
+
         await update.message.reply_text(
             "❌ ID noto‘g‘ri."
         )
+
         return
 
     if admin_id == OWNER_ID:
+
         await update.message.reply_text(
-            "❌ Egani adminlikdan olib bo‘lmaydi."
+            "❌ Egani o‘chirib bo‘lmaydi."
         )
+
         return
 
-    ADMIN_IDS.discard(admin_id)
+    ADMIN_IDS.discard(
+        admin_id
+    )
 
     await update.message.reply_text(
         "✅ Admin olib tashlandi."
@@ -949,16 +1010,16 @@ async def remove_admin_command(
 
 
 # =========================================================
-# XATOLIK
+# ERROR
 # =========================================================
 
 async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE
+    update,
+    context
 ):
 
     logger.error(
-        "Exception while handling update:",
+        "Bot error:",
         exc_info=context.error
     )
 
@@ -970,81 +1031,119 @@ async def error_handler(
 def main():
 
     if not TOKEN:
+
         raise RuntimeError(
-            "BOT_TOKEN topilmadi!"
+            "BOT_TOKEN topilmadi! "
+            "GitHub Secrets'da BOT_TOKEN yarating."
         )
 
     if not OWNER_ID:
+
         raise RuntimeError(
-            "OWNER_ID topilmadi!"
+            "OWNER_ID yoki ADMIN_ID topilmadi! "
+            "GitHub Secrets'da OWNER_ID yoki ADMIN_ID yarating."
         )
 
     init_db()
 
     app = (
-        Application.builder()
+        Application
+        .builder()
         .token(TOKEN)
         .build()
     )
 
     # Commands
     app.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
     app.add_handler(
-        CommandHandler("konkurs", konkurs)
+        CommandHandler(
+            "konkurs",
+            konkurs
+        )
     )
 
     app.add_handler(
-        CommandHandler("random", random_command)
+        CommandHandler(
+            "random",
+            random_command
+        )
     )
 
     app.add_handler(
-        CommandHandler("batl", batl_command)
+        CommandHandler(
+            "batl",
+            batl_command
+        )
     )
 
     app.add_handler(
-        CommandHandler("top", top_command)
+        CommandHandler(
+            "top",
+            top_command
+        )
     )
 
     app.add_handler(
-        CommandHandler("vote", vote_command)
+        CommandHandler(
+            "vote",
+            vote_command
+        )
     )
 
     app.add_handler(
-        CommandHandler("stats", stats_command)
+        CommandHandler(
+            "stats",
+            stats_command
+        )
     )
 
     app.add_handler(
-        CommandHandler("post", post_to_channel)
+        CommandHandler(
+            "post",
+            post_command
+        )
     )
 
     app.add_handler(
-        CommandHandler("addadmin", add_admin_command)
+        CommandHandler(
+            "addadmin",
+            add_admin_command
+        )
     )
 
     app.add_handler(
-        CommandHandler("removeadmin", remove_admin_command)
+        CommandHandler(
+            "removeadmin",
+            remove_admin_command
+        )
     )
 
-    # Buttons
+    # Tugmalar
     app.add_handler(
         CallbackQueryHandler(
             menu_callback
         )
     )
 
-    # Oddiy foydalanuvchilarni database'ga yozish
+    # Har qanday oddiy xabar:
+    # foydalanuvchini bazaga saqlaydi.
+    #
+    # Admin xabari bo‘lsa:
+    # admin_message_handler ham ishlaydi.
     app.add_handler(
         MessageHandler(
             filters.ALL & ~filters.COMMAND,
-            save_and_ignore
+            save_user_handler
         ),
         group=1
     )
 
-    # Admin xabarlari
     app.add_handler(
         MessageHandler(
             filters.ALL & ~filters.COMMAND,
@@ -1058,7 +1157,7 @@ def main():
     )
 
     logger.info(
-        "KonkursOvozbot ishga tushdi!"
+        "KonkursOvozbot ishga tushmoqda..."
     )
 
     app.run_polling(
@@ -1066,16 +1165,25 @@ def main():
     )
 
 
-async def save_and_ignore(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+# =========================================================
+# USER SAVE HANDLER
+# =========================================================
+
+async def save_user_handler(
+    update,
+    context
 ):
 
     if update.effective_user:
+
         save_user(
             update.effective_user
         )
 
+
+# =========================================================
+# START
+# =========================================================
 
 if __name__ == "__main__":
     main()
