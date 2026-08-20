@@ -24,36 +24,148 @@ logging.basicConfig(
     level=logging.INFO,
 )
 
+logger = logging.getLogger(__name__)
+
+
 # =========================================================
 # DATA
 # =========================================================
 
-data = {
+DEFAULT_DATA = {
     "contest_active": False,
     "contest_text": "",
+    "contest_message_id": None,
     "participants": {},
     "votes": {},
     "users": []
 }
+
+data = DEFAULT_DATA.copy()
+
+
+def save_data():
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                data,
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+    except Exception as e:
+        logger.error(f"DATA SAQLASH XATOSI: {e}")
 
 
 def load_data():
     global data
 
     try:
+        if not os.path.exists(DATA_FILE):
+            data = DEFAULT_DATA.copy()
+            save_data()
+            return
+
         with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
+            loaded = json.load(f)
+
+        if not isinstance(loaded, dict):
+            data = DEFAULT_DATA.copy()
+            save_data()
+            return
+
+        data = DEFAULT_DATA.copy()
+        data.update(loaded)
+
+        if not isinstance(data.get("participants"), dict):
+            data["participants"] = {}
+
+        if not isinstance(data.get("votes"), dict):
+            data["votes"] = {}
+
+        if not isinstance(data.get("users"), list):
+            data["users"] = []
+
+    except Exception as e:
+        logger.error(f"DATA OCHISH XATOSI: {e}")
+        data = DEFAULT_DATA.copy()
         save_data()
 
 
-def save_data():
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(
-            data,
-            f,
-            ensure_ascii=False,
-            indent=2
+# =========================================================
+# FOYDALANUVCHI
+# =========================================================
+
+def add_user(user_id: int):
+    if user_id not in data["users"]:
+        data["users"].append(user_id)
+        save_data()
+
+
+# =========================================================
+# OBUNA TEKSHIRISH
+# =========================================================
+
+async def is_subscribed(bot, user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(
+            CHANNEL,
+            user_id
+        )
+
+        return member.status in (
+            "member",
+            "administrator",
+            "creator"
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Obuna tekshirish xatosi: {e}"
+        )
+        return False
+
+
+def sponsor_keyboard():
+    channel_username = CHANNEL.replace("@", "")
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "📢 Homiy kanal",
+                url=f"https://t.me/{channel_username}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "✅ Obunani tekshirish",
+                callback_data="check_subscription"
+            )
+        ]
+    ])
+
+
+async def show_subscription_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    text = (
+        "🏆 <b>KonkursOvozbot</b>\n\n"
+        "Ovoz berish uchun avval homiy kanalga "
+        "obuna bo‘ling 👇"
+    )
+
+    if update.callback_query:
+        await update.callback_query.message.reply_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=sponsor_keyboard()
+        )
+    elif update.message:
+        await update.message.reply_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=sponsor_keyboard()
         )
 
 
@@ -61,23 +173,28 @@ def save_data():
 # START
 # =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.effective_user:
+        return
 
     user = update.effective_user
 
-    if user.id not in data["users"]:
-        data["users"].append(user.id)
-        save_data()
+    add_user(user.id)
 
-    # /start=vote_123
+    # /start vote_123456
     if context.args:
 
-        arg = context.args[0]
+        argument = context.args[0]
 
-        if arg.startswith("vote_"):
+        if argument.startswith("vote_"):
+
             try:
                 participant_id = int(
-                    arg.replace("vote_", "")
+                    argument.replace("vote_", "", 1)
                 )
 
                 await process_referral_vote(
@@ -85,9 +202,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     context,
                     participant_id
                 )
+
                 return
 
-            except Exception:
+            except ValueError:
                 pass
 
     keyboard = [
@@ -105,93 +223,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "uchun kerakli tugmani tanlang."
     )
 
-    await update.message.reply_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# =========================================================
-# SUBSCRIPTION
-# =========================================================
-
-async def is_subscribed(bot, user_id):
-
-    try:
-
-        member = await bot.get_chat_member(
-            CHANNEL,
-            user_id
-        )
-
-        return member.status in [
-            "member",
-            "administrator",
-            "creator"
-        ]
-
-    except Exception as e:
-
-        logging.error(
-            f"Obuna tekshirish xatosi: {e}"
-        )
-
-        return False
-
-
-# =========================================================
-# HOMIY KANAL
-# =========================================================
-
-def sponsor_keyboard():
-
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "📢 Homiy kanal",
-                url=f"https://t.me/{CHANNEL.replace('@', '')}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "✅ Obunani tekshirish",
-                callback_data="check_subscription"
-            )
-        ]
-    ])
-
-
-async def subscription_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    text = (
-        "🏆 <b>KonkursOvozbot</b>\n\n"
-        "Ovoz berish uchun homiy kanalga "
-        "obuna bo‘ling."
-    )
-
-    if update.callback_query:
-
-        await update.callback_query.message.reply_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=sponsor_keyboard()
-        )
-
-    else:
-
+    if update.message:
         await update.message.reply_text(
             text,
             parse_mode="HTML",
-            reply_markup=sponsor_keyboard()
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
 
 # =========================================================
-# KONKURS MATNI
+# KONKURS TUGMALARI
 # =========================================================
 
 def contest_keyboard():
@@ -212,55 +253,59 @@ def contest_keyboard():
     ])
 
 
+# =========================================================
+# KONKURS MATNI
+# =========================================================
+
 def build_contest_text():
 
-    participants = data["participants"]
-
-    text = data["contest_text"]
+    text = data.get("contest_text", "")
 
     if not text:
         text = (
-            "🏆 <b>BATL Boshlandi</b> 🥳\n\n"
-            "❗ Konkurs shartlari:\n"
-            "Kanalga obuna bo‘lish va do‘stlaringiz "
-            "sizga ovoz berishini so‘rashdan iborat.\n\n"
-            "🎁 <b>Konkursga qo‘yilgan yutuqlar</b>\n"
+            "🏆 <b>BATL BOSHLANDI</b> 🥳\n\n"
+            "❗ <b>Konkurs shartlari:</b>\n"
+            "Kanalga obuna bo‘ling va do‘stlaringizni "
+            "sizga ovoz berishga taklif qiling.\n\n"
+            "🎁 <b>Konkurs yutuqlari</b>\n"
             "Hozircha sir 🤫\n\n"
             "➕ <b>Konkursga qo‘shilish uchun</b>\n"
-            "quyidagi tugmani bosing 👇\n\n"
+            "quyidagi tugmani bosing 👇"
         )
 
-    text += "\n\n"
+    participants = data.get("participants", {})
 
-    if participants:
-
-        text += "👥 <b>Qatnashchilar:</b>\n\n"
-
-        sorted_people = sorted(
-            participants.items(),
-            key=lambda x: x[1]["votes"],
-            reverse=True
-        )
-
-        for pid, person in sorted_people:
-
-            username = person["username"]
-
-            if username:
-                name = f"@{username}"
-            else:
-                name = person["name"]
-
-            text += (
-                f"👤 <b>{name}</b> — "
-                f"{person['votes']} 📦\n"
-            )
-
-    else:
+    if not participants:
 
         text += (
-            "👥 Hozircha hech kim "
-            "konkursga qo‘shilmagan."
+            "\n\n👥 <b>Qatnashchilar:</b>\n"
+            "Hozircha hech kim qo‘shilmagan."
+        )
+
+        return text
+
+    text += "\n\n👥 <b>Qatnashchilar:</b>\n\n"
+
+    sorted_people = sorted(
+        participants.items(),
+        key=lambda item: item[1].get("votes", 0),
+        reverse=True
+    )
+
+    for participant_id, person in sorted_people:
+
+        username = person.get("username", "")
+        name = person.get("name", "Noma'lum")
+        votes = person.get("votes", 0)
+
+        if username:
+            display_name = f"@{username}"
+        else:
+            display_name = name
+
+        text += (
+            f"👤 <b>{display_name}</b> — "
+            f"{votes} 📦\n"
         )
 
     return text
@@ -278,7 +323,7 @@ async def open_contest(
     query = update.callback_query
     await query.answer()
 
-    if not data["contest_active"]:
+    if not data.get("contest_active", False):
 
         await query.message.reply_text(
             "❌ Hozircha faol konkurs yo‘q."
@@ -302,6 +347,9 @@ async def konkurs(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
+    if not update.effective_user:
+        return
+
     if update.effective_user.id != ADMIN_ID:
 
         await update.message.reply_text(
@@ -313,6 +361,7 @@ async def konkurs(
     data["contest_active"] = True
     data["participants"] = {}
     data["votes"] = {}
+    data["contest_message_id"] = None
 
     if context.args:
 
@@ -323,12 +372,12 @@ async def konkurs(
     else:
 
         data["contest_text"] = (
-            "🏆 <b>BATL Boshlandi</b> 🥳\n\n"
-            "❗ <b>Konkurs shartlari</b>\n"
-            "Kanalga obuna bo‘lish va "
-            "do‘stlaringiz sizga ovoz berishini "
-            "so‘rashdan iborat.\n\n"
-            "🎁 <b>Konkursga qo‘yilgan yutuqlar</b>\n"
+            "🏆 <b>BATL BOSHLANDI</b> 🥳\n\n"
+            "❗ <b>Konkurs shartlari:</b>\n"
+            "Kanalga obuna bo‘ling va "
+            "do‘stlaringizni sizga ovoz berishga "
+            "taklif qiling.\n\n"
+            "🎁 <b>Konkurs yutuqlari</b>\n"
             "Hozircha sir 🤫\n\n"
             "➕ <b>Konkursga qo‘shilish uchun</b>\n"
             "quyidagi tugmani bosing 👇"
@@ -336,6 +385,7 @@ async def konkurs(
 
     save_data()
 
+    # Admin chatida ham ko‘rsatadi
     await update.message.reply_text(
         build_contest_text(),
         parse_mode="HTML",
@@ -357,7 +407,7 @@ async def join_contest(
 
     user = query.from_user
 
-    if not data["contest_active"]:
+    if not data.get("contest_active", False):
 
         await query.message.reply_text(
             "❌ Konkurs tugagan."
@@ -372,7 +422,7 @@ async def join_contest(
 
     if not subscribed:
 
-        await subscription_message(
+        await show_subscription_message(
             update,
             context
         )
@@ -381,19 +431,22 @@ async def join_contest(
 
     user_id = str(user.id)
 
+    bot_info = await context.bot.get_me()
+
+    link = (
+        f"https://t.me/{bot_info.username}"
+        f"?start=vote_{user.id}"
+    )
+
+    # Oldindan qo‘shilgan
     if user_id in data["participants"]:
 
         participant = data["participants"][user_id]
 
-        bot_info = await context.bot.get_me()
-
-        link = (
-            f"https://t.me/{bot_info.username}"
-            f"?start=vote_{user.id}"
-        )
-
         await query.message.reply_text(
-            "✅ Siz allaqachon konkursdasiz!\n\n"
+            "✅ <b>Siz allaqachon konkursdasiz!</b>\n\n"
+            f"👤 Ism: <b>{participant.get('name', user.full_name)}</b>\n"
+            f"📦 Ovozlar: <b>{participant.get('votes', 0)}</b>\n\n"
             "🔗 <b>Sizning ovoz linkingiz:</b>\n"
             f"{link}\n\n"
             "👥 Shu linkni do‘stlaringizga yuboring.",
@@ -402,22 +455,14 @@ async def join_contest(
 
         return
 
-    username = user.username or ""
-
+    # Yangi qatnashchi
     data["participants"][user_id] = {
         "name": user.full_name,
-        "username": username,
+        "username": user.username or "",
         "votes": 0
     }
 
     save_data()
-
-    bot_info = await context.bot.get_me()
-
-    link = (
-        f"https://t.me/{bot_info.username}"
-        f"?start=vote_{user.id}"
-    )
 
     await query.message.reply_text(
         "🎉 <b>Konkursga muvaffaqiyatli qo‘shildingiz!</b>\n\n"
@@ -428,13 +473,6 @@ async def join_contest(
         "👥 Shu linkni do‘stlaringizga yuboring "
         "va sizga ovoz berishlarini so‘rang.",
         parse_mode="HTML"
-    )
-
-    # Kanalga yangilangan konkurs xabarini yuborish
-    await query.message.reply_text(
-        build_contest_text(),
-        parse_mode="HTML",
-        reply_markup=contest_keyboard()
     )
 
 
@@ -450,7 +488,7 @@ async def process_referral_vote(
 
     voter = update.effective_user
 
-    if not data["contest_active"]:
+    if not data.get("contest_active", False):
 
         await update.message.reply_text(
             "❌ Hozircha faol konkurs yo‘q."
@@ -468,6 +506,7 @@ async def process_referral_vote(
 
         return
 
+    # Ovoz beruvchi kanalga obuna bo‘lishi kerak
     subscribed = await is_subscribed(
         context.bot,
         voter.id
@@ -475,13 +514,14 @@ async def process_referral_vote(
 
     if not subscribed:
 
-        await subscription_message(
+        await show_subscription_message(
             update,
             context
         )
 
         return
 
+    # O‘ziga ovoz
     if str(voter.id) == participant_id:
 
         await update.message.reply_text(
@@ -490,9 +530,8 @@ async def process_referral_vote(
 
         return
 
-    vote_key = (
-        f"{voter.id}_{participant_id}"
-    )
+    # Bitta odam bitta qatnashchiga faqat bir marta
+    vote_key = f"{voter.id}_{participant_id}"
 
     if vote_key in data["votes"]:
 
@@ -505,31 +544,32 @@ async def process_referral_vote(
 
     data["votes"][vote_key] = True
 
-    data["participants"][participant_id]["votes"] += 1
+    data["participants"][participant_id]["votes"] = (
+        data["participants"][participant_id].get("votes", 0) + 1
+    )
 
     save_data()
 
     participant = data["participants"][participant_id]
 
-    username = participant["username"]
+    username = participant.get("username", "")
+    name = participant.get("name", "Noma'lum")
 
     if username:
-        name = f"@{username}"
+        display_name = f"@{username}"
     else:
-        name = participant["name"]
+        display_name = name
 
     await update.message.reply_text(
         "✅ <b>Ovozingiz qabul qilindi!</b>\n\n"
-        f"👤 Qatnashchi: <b>{name}</b>\n"
-        f"📦 Jami ovoz: <b>{participant['votes']}</b>\n\n"
-        "🏆 Konkursda yana boshqa "
-        "qatnashchilarga ham ovoz berishingiz mumkin.",
+        f"👤 Qatnashchi: <b>{display_name}</b>\n"
+        f"📦 Jami ovoz: <b>{participant['votes']}</b>",
         parse_mode="HTML"
     )
 
 
 # =========================================================
-# OBUNANI TEKSHIRISH
+# OBUNANI QAYTA TEKSHIRISH
 # =========================================================
 
 async def check_subscription(
@@ -575,7 +615,7 @@ async def results(
 
     await query.answer()
 
-    participants = data["participants"]
+    participants = data.get("participants", {})
 
     if not participants:
 
@@ -587,7 +627,7 @@ async def results(
 
     sorted_people = sorted(
         participants.items(),
-        key=lambda x: x[1]["votes"],
+        key=lambda item: item[1].get("votes", 0),
         reverse=True
     )
 
@@ -599,17 +639,19 @@ async def results(
         3: "🥉"
     }
 
-    for index, (pid, person) in enumerate(
+    for index, (participant_id, person) in enumerate(
         sorted_people,
         start=1
     ):
 
-        username = person["username"]
+        username = person.get("username", "")
+        name = person.get("name", "Noma'lum")
+        votes = person.get("votes", 0)
 
         if username:
-            name = f"@{username}"
+            display_name = f"@{username}"
         else:
-            name = person["name"]
+            display_name = name
 
         medal = medals.get(
             index,
@@ -617,8 +659,8 @@ async def results(
         )
 
         text += (
-            f"{medal} <b>{name}</b> — "
-            f"{person['votes']} 📦\n"
+            f"{medal} <b>{display_name}</b> — "
+            f"{votes} 📦\n"
         )
 
     await query.message.reply_text(
@@ -636,41 +678,49 @@ async def finish(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
+    if not update.effective_user:
+        return
+
     if update.effective_user.id != ADMIN_ID:
+
+        await update.message.reply_text(
+            "❌ Bu buyruq faqat admin uchun."
+        )
 
         return
 
     data["contest_active"] = False
-
     save_data()
 
-    participants = data["participants"]
+    participants = data.get("participants", {})
 
     if participants:
 
         sorted_people = sorted(
             participants.items(),
-            key=lambda x: x[1]["votes"],
+            key=lambda item: item[1].get("votes", 0),
             reverse=True
         )
 
         text = "🏁 <b>KONKURS YAKUNLANDI!</b>\n\n"
 
-        for index, (pid, person) in enumerate(
+        for index, (participant_id, person) in enumerate(
             sorted_people[:10],
             start=1
         ):
 
-            username = person["username"]
+            username = person.get("username", "")
+            name = person.get("name", "Noma'lum")
+            votes = person.get("votes", 0)
 
             if username:
-                name = f"@{username}"
+                display_name = f"@{username}"
             else:
-                name = person["name"]
+                display_name = name
 
             text += (
-                f"{index}. {name} — "
-                f"{person['votes']} 📦\n"
+                f"{index}. {display_name} — "
+                f"{votes} 📦\n"
             )
 
     else:
@@ -687,7 +737,7 @@ async def finish(
 
 
 # =========================================================
-# ADMIN: KONKURSDAGI ODAMLAR
+# ADMIN: QATNASHCHILAR
 # =========================================================
 
 async def participants_command(
@@ -695,11 +745,13 @@ async def participants_command(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    if update.effective_user.id != ADMIN_ID:
-
+    if not update.effective_user:
         return
 
-    people = data["participants"]
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    people = data.get("participants", {})
 
     if not people:
 
@@ -711,19 +763,68 @@ async def participants_command(
 
     text = "👥 <b>QATNASHCHILAR</b>\n\n"
 
-    for pid, person in people.items():
+    sorted_people = sorted(
+        people.items(),
+        key=lambda item: item[1].get("votes", 0),
+        reverse=True
+    )
 
-        username = person["username"]
+    for index, (participant_id, person) in enumerate(
+        sorted_people,
+        start=1
+    ):
+
+        username = person.get("username", "")
+        name = person.get("name", "Noma'lum")
+        votes = person.get("votes", 0)
 
         if username:
-            name = f"@{username}"
+            display_name = f"@{username}"
         else:
-            name = person["name"]
+            display_name = name
 
         text += (
-            f"👤 {name}\n"
-            f"📦 {person['votes']} ovoz\n\n"
+            f"{index}. 👤 {display_name}\n"
+            f"📦 {votes} ovoz\n\n"
         )
+
+    await update.message.reply_text(
+        text,
+        parse_mode="HTML"
+    )
+
+
+# =========================================================
+# ADMIN: STATISTIKA
+# =========================================================
+
+async def stats(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.effective_user:
+        return
+
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    users_count = len(data.get("users", []))
+    participants_count = len(
+        data.get("participants", {})
+    )
+    votes_count = len(
+        data.get("votes", {})
+    )
+
+    text = (
+        "📊 <b>BOT STATISTIKASI</b>\n\n"
+        f"👥 Botdan foydalanganlar: <b>{users_count}</b>\n"
+        f"🏆 Qatnashchilar: <b>{participants_count}</b>\n"
+        f"📦 Berilgan ovozlar: <b>{votes_count}</b>\n"
+        f"🔴 Konkurs: "
+        f"<b>{'Faol' if data.get('contest_active') else 'Yopiq'}</b>"
+    )
 
     await update.message.reply_text(
         text,
@@ -740,8 +841,8 @@ async def error_handler(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    logging.error(
-        "Xatolik:",
+    logger.error(
+        "Bot xatosi:",
         exc_info=context.error
     )
 
@@ -753,9 +854,13 @@ async def error_handler(
 def main():
 
     if not TOKEN:
-
-        raise ValueError(
+        raise RuntimeError(
             "BOT_TOKEN GitHub Secrets'da topilmadi!"
+        )
+
+    if ADMIN_ID == 0:
+        raise RuntimeError(
+            "ADMIN_ID GitHub Secrets'da noto'g'ri!"
         )
 
     load_data()
@@ -766,7 +871,10 @@ def main():
         .build()
     )
 
-    # START
+    # -------------------------
+    # COMMANDS
+    # -------------------------
+
     app.add_handler(
         CommandHandler(
             "start",
@@ -774,7 +882,6 @@ def main():
         )
     )
 
-    # ADMIN
     app.add_handler(
         CommandHandler(
             "konkurs",
@@ -796,35 +903,48 @@ def main():
         )
     )
 
+    app.add_handler(
+        CommandHandler(
+            "stats",
+            stats
+        )
+    )
+
+    # -------------------------
     # BUTTONS
+    # -------------------------
 
     app.add_handler(
         CallbackQueryHandler(
             open_contest,
-            pattern="^open_contest$"
+            pattern=r"^open_contest$"
         )
     )
 
     app.add_handler(
         CallbackQueryHandler(
             join_contest,
-            pattern="^join_contest$"
+            pattern=r"^join_contest$"
         )
     )
 
     app.add_handler(
         CallbackQueryHandler(
             check_subscription,
-            pattern="^check_subscription$"
+            pattern=r"^check_subscription$"
         )
     )
 
     app.add_handler(
         CallbackQueryHandler(
             results,
-            pattern="^results$"
+            pattern=r"^results$"
         )
     )
+
+    # -------------------------
+    # ERROR
+    # -------------------------
 
     app.add_error_handler(
         error_handler
@@ -834,6 +954,14 @@ def main():
         "🤖 Ovoz Battle Pro ishga tushdi!"
     )
 
+    print(
+        "✅ Bot polling rejimida ishlayapti..."
+    )
+
+    # MUHIM:
+    # Bu qator botni doimiy ishlatadi.
+    # GitHub Actions'da run-bot "6 soat" deb turishi
+    # shuning uchun normal.
     app.run_polling(
         drop_pending_updates=True
     )
